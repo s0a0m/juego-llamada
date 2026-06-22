@@ -9,76 +9,82 @@ const io = new Server(server, { cors: { origin: "*" } });
 
 app.use(express.static(path.join(__dirname, 'public')));
 
-// Estructura para manejar salas independientes
 let rooms = {};
 
 io.on('connection', (socket) => {
-  socket.on('join_room', (roomName) => {
-    socket.join(roomName);
+  // Ahora pasamos el usuario al unirnos para que el server sepa de entrada quiénes juegan
+  socket.on('join_room', ({ room, user }) => {
+    socket.join(room);
 
-    if (!rooms[roomName]) {
-      rooms[roomName] = {
-        roundActive: false,
-        firstPressBy: null,
+    if (!rooms[room]) {
+      rooms[room] = {
+        active: false,
+        users: [],
+        currentPlayer: null,
         timeoutId: null,
+        lastSwitchTime: 0,
         restartVotes: new Set()
       };
     }
+
+    // Agregar al usuario a la lista si no está
+    if (!rooms[room].users.includes(user)) {
+      rooms[room].users.push(user);
+    }
+
+    // Avisar a todos en la sala quiénes están
+    io.to(room).emit('room_state', {
+      active: rooms[room].active,
+      users: rooms[room].users
+    });
   });
 
   socket.on('press_button', ({ room, user }) => {
     let game = rooms[room];
     if (!game) return;
 
-    if (!game.roundActive) {
-      // Empieza la ronda
-      game.roundActive = true;
-      game.firstPressBy = user;
-      game.restartVotes.clear(); // Limpiar votos de reinicios anteriores
+    // Si el juego está corriendo, solo puede apretar el que tiene el turno
+    if (game.active && game.currentPlayer !== user) return;
 
-      // Avisar a todos que alguien presionó y mandar timestamp exacto del inicio
-      const startTime = Date.now();
-      io.to(room).emit('player_pressed', { first: user, startTime: startTime });
+    // Limpiar el temporizador anterior
+    clearTimeout(game.timeoutId);
+    game.active = true;
+    game.restartVotes.clear();
 
-      // El servidor mantiene el timeout de seguridad por si se corta la conexión
-      game.timeoutId = setTimeout(() => {
-        if (game.roundActive) {
-          io.to(room).emit('game_over', { winner: user, reason: 'timeout' });
-          game.roundActive = false;
-        }
-      }, 2000);
-    } else {
-      // Segundo jugador presionó dentro del tiempo
-      if (user !== game.firstPressBy) {
-        clearTimeout(game.timeoutId);
-        io.to(room).emit('round_saved', { user2: user });
-        game.roundActive = false;
-        game.firstPressBy = null;
-      }
-    }
+    // El turno pasa al rival (el otro usuario en la sala)
+    const rival = game.users.find(u => u !== user);
+    if (!rival) return; // Si no hay rival conectado, no hace nada
+
+    game.currentPlayer = rival;
+    game.lastSwitchTime = Date.now();
+
+    // Avisar a los navegadores que cambió el turno y se resetea el reloj a 2s
+    io.to(room).emit('turn_switched', {
+      currentPlayer: game.currentPlayer,
+      switchTime: game.lastSwitchTime
+    });
+
+    // Iniciar la bomba de tiempo de 2 segundos para el rival
+    game.timeoutId = setTimeout(() => {
+      game.active = false;
+      io.to(room).emit('game_over', { loser: game.currentPlayer });
+    }, 2000);
   });
 
-  // Lógica de confirmación mutua para reiniciar cuando alguien pierde
   socket.on('vote_restart', ({ room, user }) => {
     let game = rooms[room];
     if (!game) return;
 
     game.restartVotes.add(user);
-
-    // Avisar a la sala quién quiere reiniciar
     io.to(room).emit('restart_status', { voted: Array.from(game.restartVotes) });
 
-    // Si están los votos de ambos (mínimo 2 jugadores)
     if (game.restartVotes.size >= 2) {
       game.restartVotes.clear();
-      game.roundActive = false;
-      game.firstPressBy = null;
+      game.active = false;
+      game.currentPlayer = null;
+      clearTimeout(game.timeoutId);
       io.to(room).emit('game_restarted');
     }
-  });
-
-  socket.on('disconnect', () => {
-    // Limpieza básica si se desconectan se podría agregar aquí
   });
 });
 
