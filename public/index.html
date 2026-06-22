@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Juego en Llamada - Modo Infinito</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #121212;
+            color: #fff;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+        }
+        .container { text-align: center; width: 90%; max-width: 400px; }
+        button {
+            background: #ff4757;
+            color: white;
+            border: none;
+            padding: 25px 50px;
+            font-size: 28px;
+            font-weight: bold;
+            border-radius: 50px;
+            cursor: pointer;
+            box-shadow: 0 5px 15px rgba(255, 71, 87, 0.4);
+            transition: transform 0.1s, background 0.2s;
+            width: 100%;
+        }
+        button:active { transform: scale(0.95); }
+        button:disabled { background: #555; cursor: not-allowed; box-shadow: none; }
+        
+        #timer-box {
+            font-size: 48px;
+            font-weight: bold;
+            margin: 20px 0;
+            color: #00ff88;
+            font-family: monospace;
+            height: 60px;
+        }
+        #status { font-size: 18px; margin-top: 10px; min-height: 40px; color: #ffa502; }
+        .setup { display: flex; flex-direction: column; gap: 10px; }
+        input { padding: 12px; border-radius: 8px; border: none; font-size: 16px; background: #222; color: #fff; border: 1px solid #444; }
+        
+        .restart-panel {
+            margin-top: 20px;
+            background: #1e1e1e;
+            padding: 15px;
+            border-radius: 10px;
+            border: 1px solid #333;
+        }
+        .btn-restart { font-size: 16px; padding: 10px; background: #2ed573; box-shadow: none; margin-top: 10px; }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <div id="setup-area" class="setup">
+            <h2>Juego de la Palabra</h2>
+            <input type="text" id="username" placeholder="Tu Nombre">
+            <input type="text" id="room" placeholder="Nombre de sala privada">
+            <button onclick="connect()" style="font-size: 18px; padding: 12px;">Entrar a la Sala</button>
+        </div>
+
+        <div id="game-area" style="display: none;">
+            <p id="welcome-msg" style="color: #888; font-size: 14px;"></p>
+            
+            <div id="timer-box">2.00s</div>
+            
+            <button id="action-btn" onclick="pressButton()">¡YA!</button>
+            <div id="status">La sala está lista. Hablen y presionen al decir la palabra.</div>
+
+            <div id="restart-area" class="restart-panel" style="display: none;">
+                <span id="restart-msg">Alguien perdió la ronda.</span>
+                <button id="restart-btn" class="btn-restart" onclick="voteRestart()">Pedir Reinicio</button>
+                <p id="votes-status" style="font-size: 12px; color: #aaa; margin-top: 8px;"></p>
+            </div>
+        </div>
+    </div>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+        let socket;
+        let roomName = "";
+        let username = "";
+        let countdownInterval;
+
+        function connect() {
+            username = document.getElementById('username').value.trim();
+            roomName = document.getElementById('room').value.trim();
+
+            if (!username || !roomName) {
+                alert("Completa los datos fiera.");
+                return;
+            }
+
+            socket = io();
+            socket.emit('join_room', roomName);
+
+            document.getElementById('setup-area').style.display = 'none';
+            document.getElementById('game-area').style.display = 'block';
+            document.getElementById('welcome-msg').innerText = `Sala: ${roomName} | Jugador: ${username}`;
+
+            // 1. Alguien metió el primer toque
+            socket.on('player_pressed', (data) => {
+                document.getElementById('restart-area').style.display = 'none';
+                
+                if (data.first === username) {
+                    document.getElementById('status').innerText = "¡Pusiste primera! Esperando respuesta...";
+                } else {
+                    document.getElementById('status').innerText = `¡${data.first} habló! ¡DALE!`;
+                }
+
+                // Iniciar contador visual super preciso de 2 segundos corriendo hacia atrás
+                clearInterval(countdownInterval);
+                const timerBox = document.getElementById('timer-box');
+                timerBox.style.color = "#ff4757";
+
+                countdownInterval = setInterval(() => {
+                    const elapsed = Date.now() - data.startTime;
+                    const remaining = Math.max(0, 2000 - elapsed);
+                    
+                    timerBox.innerText = (remaining / 1000).toFixed(2) + "s";
+
+                    if (remaining <= 0) {
+                        clearInterval(countdownInterval);
+                    }
+                }, 30); // Actualiza cada 30ms para animación fluida
+            });
+
+            // 2. Respondieron a tiempo -> Se salva la ronda y se sigue jugando derecho
+            socket.on('round_saved', (data) => {
+                clearInterval(countdownInterval);
+                document.getElementById('timer-box').innerText = "2.00s";
+                document.getElementById('timer-box').style.color = "#00ff88";
+                document.getElementById('status').innerText = "¡Salvados! Siguiente palabra cuando quieran...";
+            });
+
+            // 3. Game Over (Se terminó el tiempo de 2 segundos)
+            socket.on('game_over', (data) => {
+                clearInterval(countdownInterval);
+                document.getElementById('timer-box').innerText = "0.00s";
+                document.getElementById('action-btn').disabled = true;
+
+                if (data.winner === username) {
+                    document.getElementById('status').innerText = "¡Ganaste la ronda! El otro se durmió.";
+                } else {
+                    document.getElementById('status').innerText = "❌ ¡Perdiste por lento! Te pasaste de los 2s.";
+                }
+
+                // Mostrar panel de confirmación mutua obligatoria para reiniciar
+                document.getElementById('restart-area').style.display = 'block';
+                document.getElementById('votes-status').innerText = "Esperando confirmaciones...";
+            });
+
+            // Status de quién va votando el reinicio
+            socket.on('restart_status', (data) => {
+                document.getElementById('votes-status').innerText = `Listos para reiniciar: ${data.voted.join(', ')}`;
+            });
+
+            // Ambos aceptaron reiniciar el juego completo
+            socket.on('game_restarted', () => {
+                document.getElementById('restart-area').style.display = 'none';
+                document.getElementById('action-btn').disabled = false;
+                document.getElementById('timer-box').innerText = "2.00s";
+                document.getElementById('timer-box').style.color = "#00ff88";
+                document.getElementById('status').innerText = "¡Juego reiniciado! Ya pueden empezar de nuevo.";
+                document.getElementById('restart-btn').disabled = false;
+            });
+        }
+
+        function pressButton() {
+            if (socket) {
+                socket.emit('press_button', { room: roomName, user: username });
+            }
+        }
+
+        function voteRestart() {
+            if (socket) {
+                document.getElementById('restart-btn').disabled = true;
+                socket.emit('vote_restart', { room: roomName, user: username });
+            }
+        }
+    </script>
+</body>
+</html>
